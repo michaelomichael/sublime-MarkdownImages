@@ -12,12 +12,15 @@ import subprocess
 import sys
 import re
 
-
 DEBUG = False
+
+LEADING_WHITESPACE_REGEX = re.compile("^([ \t]*)")
+IMAGE_ATTRIBUTES_REGEX = re.compile(r'.*\)\{(.*)\}')
 
 def debug(*args, **kwargs):
     if DEBUG:
         print(*args, **kwargs)
+
 
 settings_file = 'MarkdownImages.sublime-settings'
 
@@ -86,12 +89,12 @@ class ImageHandler:
     # Maps view IDs to sets of phantom (key, html) pairs
     phantoms = defaultdict(set)
     # Cached remote URL image data. Kept even if not rendered.
-    urldata = defaultdict(dict)
+    cached_remote_urls = defaultdict(dict)
 
     @staticmethod
     def on_close(view):
         ImageHandler._erase_phantoms(view)
-        ImageHandler.urldata.pop(view.id(), None)
+        ImageHandler.cached_remote_urls.pop(view.id(), None)
 
     @staticmethod
     def show_images(view, max_width=None, show_local=True, show_remote=False, base_path=""):
@@ -99,16 +102,16 @@ class ImageHandler:
         if not show_local and not show_remote:
             debug("doing nothing")
             return
+
         # Note: Excessive size will cause the ST3 window to become blank
         # unrecoverably. 1024 apperas to be a safe limit,
         # but can possibly go higher.
         if not max_width or max_width < 0:
             max_width = 1024
 
-        skip = 0
-
         phantoms = {}
         img_regs = view.find_by_selector(ImageHandler.selector)
+
         # Handling space characters in image links
         # Image links not enclosed in <> that contain spaces
         # are parsed by sublime as multiple links instead of one.
@@ -120,7 +123,8 @@ class ImageHandler:
             if (view.substr(inter_region)).isspace():
                 # the inter_region is all spaces
                 # Noting that left and right regions must be merged
-                indexes_to_merge += [i+1]
+                indexes_to_merge += [i + 1]
+
         new_img_regs = []
         for i in range(len(img_regs)):
             if i in indexes_to_merge:
@@ -130,8 +134,9 @@ class ImageHandler:
         img_regs = new_img_regs
 
         for region in reversed(img_regs):
-            ttype = None
-            urldata = None
+            line_region = view.line(region)
+            print("## In reversed list, looking at region (%d,%d) [%s]" % (region.a, region.b, view.substr(region)))
+            image_data = None
             rel_p = view.substr(region)
 
             # If an image link is enclosed in <> to tolerate spaces in it,
@@ -139,7 +144,7 @@ class ImageHandler:
             # This character makes the link invalid, so it must be removed
             if rel_p[-1] == '>':
                 rel_p = rel_p[0:-1]
-            
+
             # (Windows) cutting the drive letter from the path,
             # otherwise urlparse interprets it as a scheme (like 'file' or 'http')
             # and generates a bogus url object like:
@@ -147,137 +152,58 @@ class ImageHandler:
             drive_letter, rel_p = os.path.splitdrive(rel_p)
 
             url = urllib.parse.urlparse(rel_p)
-            if url.scheme and url.scheme != 'file':
-                if not show_remote:
-                    continue
+            try:
+                if url.scheme and url.scheme != 'file':
+                    img_src, h, w, file_type, url, image_data = ImageHandler.prepare_remote_image(rel_p,
+                                                                                                                 show_remote,
+                                                                                                                 url,
+                                                                                                                 view)
+                else:
+                    img_src, h, w, file_type, url = ImageHandler.prepare_local_image(base_path,
+                                                                                                    drive_letter,
+                                                                                                    show_local, url,
+                                                                                                    view)
+            except SkipImageException:
+                continue
+            # PreparedImageDetails now contains :
+            #       html_template, h, w, img_src, file_type, url, urldata
 
-                # We can't render SVG images, so skip the request
-                # Note: not all URLs that return SVG end with .svg
-                # We could use a HEAD request to check the Content-Type before
-                # downloading the image, but the size of an SVG is typically
-                # so small to not be worth the extra request
-                if url.path.endswith('.svg'):
-                    continue
-
-                debug("image url", rel_p)
-                data = ImageHandler.urldata[view.id()].get(rel_p)
-                if not data:
-                    try:
-                        data = urllib.request.urlopen(rel_p)
-                    except Exception as e:
-                        debug("Failed to open URL {}:".format(rel_p), e)
-                        continue
-
-                    try:
-                        data = data.read()
-                    except Exception as e:
-                        debug("Failed to read data from URL {}:".format(rel_p), e)
-                        continue
-
-                try:
-                    w, h, ttype = get_image_size(io.BytesIO(data))
-                except Exception as e:
-                    msg = "Failed to get_image_size for data from URL {}"
-                    debug(msg.format(rel_p), e)
-                    continue
-
-                FMT = u'''
-                    <a href="{}">
-                        <img src="data:image/{}" class="centerImage" {}>
-                    </a>
-                '''
-                b64_data = base64.encodestring(data).decode('ascii')
-                b64_data = b64_data.replace('\n', '')
-
-                img = "{};base64,{}".format(ttype, b64_data)
-                urldata = data
-            else:
-                if not show_local:
-                    continue
-
-                # Convert relative paths to be relative to the current file
-                # or project folder.
-                # NOTE: if the current file or project folder can't be
-                # determined (e.g. if the view content is not in a project and
-                # hasn't been saved), then it will anchor to /.
-                path = url.path
-
-                # Force paths to be prefixed with base_path if it was provided
-                # in settings.
-                if base_path:
-                    path = os.path.join(base_path, path)
-
-                if not os.path.isabs(path):
-                    folder = get_path_for(view)
-                    path = os.path.join(folder, path)
-                path = os.path.normpath(path)
-                # (Windows) Adding back the drive letter that was cut from the path before
-                path = drive_letter + path
-
-                url = url._replace(scheme='file', path=path)
-
-                FMT = '''
-                    <a href="{}">
-                        <img src="{}" class="centerImage" {}>
-                    </a>
-                '''
-                try:
-                    w, h, ttype = get_file_image_size(path)
-                except Exception as e:
-                    debug("Failed to load {}:".format(path), e)
-                    continue
-                img = urllib.parse.urlunparse(url)
-
-                # On Windows, urlunparse adds a third slash after 'file://' for some reason
-                # This breaks the image url, so it must be removed
-                # splitdrive() detects windows because it only returns something if the
-                # path contains a drive letter
-                if os.path.splitdrive(path)[0]:
-                    img = img.replace('file:///', 'file://', 1)
-
-            if not ttype:
-                debug("unknown ttype")
+            if not file_type:
+                debug("unknown file_type")
                 continue
 
-            # TODO -- handle custom sizes better
-            # If only width or height are provided, scale the other dimension
-            # properly
-            # Width defined in custom size should override max_width
-            line_region = view.line(region)
-            imgattr = check_imgattr(view, line_region, region)
-            if not imgattr and w > 0 and h > 0:
-                if max_width and w > max_width:
-                    m = max_width / w
-                    h *= m
-                    w = max_width
-                imgattr = 'width="{}" height="{}"'.format(w, h)
+            img_attributes = ImageHandler.get_adjusted_img_attributes(h, w, max_width, line_region, region, view)
 
-            # Force the phantom image view to append past the end of the line
+            # Force the phantom image view to append below the first non-whitespace character in the line.
             # Otherwise, the phantom image view interlaces in between
             # word-wrapped lines
-            line_region.a = line_region.b
+            line = view.substr(line_region)
+            whitespace = LEADING_WHITESPACE_REGEX.search(line).group(1)
+            start_point = line_region.a + len(whitespace)
+            key = 'mdimage-' + str(start_point)
 
-            debug("region", region)
-            debug("line_region", line_region)
+            html = u'''
+                    <a href="%s">
+                        <img src="%s" class="centerImage" %s>
+                    </a>
+                ''' % (url.geturl(), img_src, img_attributes)
 
-            key = 'mdimage-' + str(line_region.b)
-            html_img = FMT.format(url.geturl(), img, imgattr)
-
-            phantom = (key, html_img)
-            phantoms[phantom[0]] = phantom
+            phantom = (key, html)
+            phantoms[key] = phantom
             if phantom in ImageHandler.phantoms[view.id()]:
                 debug("Phantom unchanged")
                 continue
 
             debug("Creating phantom", phantom[0])
+            print("## Creating phantom. Start point is %d" % start_point)
             view.add_phantom(phantom[0],
-                             sublime.Region(line_region.b),
+                             sublime.Region(start_point),
                              phantom[1],
-                             sublime.LAYOUT_BLOCK,
+                             sublime.LAYOUT_BELOW,
                              ImageHandler.on_navigate)
             ImageHandler.phantoms[view.id()].add(phantom)
-            if urldata is not None:
-                ImageHandler.urldata[view.id()][rel_p] = urldata
+            if image_data is not None:
+                ImageHandler.cached_remote_urls[view.id()][rel_p] = image_data
 
         # Erase leftover phantoms
         for p in list(ImageHandler.phantoms[view.id()]):
@@ -287,6 +213,114 @@ class ImageHandler:
 
         if not ImageHandler.phantoms[view.id()]:
             ImageHandler.phantoms.pop(view.id(), None)
+
+    @staticmethod
+    def get_adjusted_img_attributes(h, w, max_width, line_region, region, view):
+        """
+        Use everything within the "{...}", if the user provided it, e.g. for:
+            [Screenshot](Test.png){width="373" height="310"}
+        we would return:
+            width="373" height="310"
+
+        If no attributes are provided, we'll calculate our own width and height
+        attributes based on the detected image size.
+        """
+        # TODO -- handle custom sizes better
+        # If only width or height are provided, scale the other dimension
+        # properly
+        # Width defined in custom size should override max_width
+        img_attributes = get_provided_img_attributes(view, line_region, region)
+        if not img_attributes and w > 0 and h > 0:
+            if max_width and w > max_width:
+                m = max_width / w
+                h *= m
+                w = max_width
+            img_attributes = 'width="{}" height="{}"'.format(w, h)
+        return img_attributes
+
+    @staticmethod
+    def prepare_local_image(base_path, drive_letter, show_local, url, view):
+        if not show_local:
+            raise SkipImageException()
+
+        # Convert relative paths to be relative to the current file
+        # or project folder.
+        # NOTE: if the current file or project folder can't be
+        # determined (e.g. if the view content is not in a project and
+        # hasn't been saved), then it will anchor to /.
+        file_path = url.path
+
+        # Force paths to be prefixed with base_path if it was provided
+        # in settings.
+        if base_path:
+            file_path = os.path.join(base_path, file_path)
+        if not os.path.isabs(file_path):
+            folder = get_path_for(view)
+            file_path = os.path.join(folder, file_path)
+        file_path = os.path.normpath(file_path)
+
+        # (Windows) Adding back the drive letter that was cut from the path before
+        file_path = drive_letter + file_path
+        url = url._replace(scheme='file', path=file_path)
+
+        try:
+            w, h, file_type = get_file_image_size(file_path)
+        except Exception as e:
+            msg = "MarkdownImages: Failed to load [%s]" % file_path
+            debug(msg, e)
+            raise Exception(msg) from e
+
+        img_src = urllib.parse.urlunparse(url)
+
+        # On Windows, urlunparse adds a third slash after 'file://' for some reason
+        # This breaks the image url, so it must be removed
+        # splitdrive() detects windows because it only returns something if the
+        # path contains a drive letter
+        if os.path.splitdrive(file_path)[0]:
+            img_src = img_src.replace('file:///', 'file://', 1)
+
+        return img_src, h, w, file_type, url
+
+    @staticmethod
+    def prepare_remote_image(rel_p, show_remote, url, view):
+        if not show_remote:
+            raise SkipImageException()
+
+        # We can't render SVG images, so skip the request
+        # Note: not all URLs that return SVG end with .svg
+        # We could use a HEAD request to check the Content-Type before
+        # downloading the image, but the size of an SVG is typically
+        # so small to not be worth the extra request
+        if url.path.endswith('.svg'):
+            print("MarkdownImages: We can't render SVG images yet, sorry.")
+            raise SkipImageException()
+
+        debug("image url", rel_p)
+        image_data = ImageHandler.cached_remote_urls[view.id()].get(rel_p)
+        if not image_data:
+            try:
+                response = urllib.request.urlopen(rel_p)
+            except Exception as e:
+                msg = "MarkdownImages: Failed to open URL [%s]" % rel_p
+                debug(msg, e)
+                raise Exception(msg) from e
+
+            try:
+                image_data = response.read()
+            except Exception as e:
+                msg = "MarkdownImages: Failed to read data from URL [%s]" % rel_p
+                debug(msg, e)
+                raise Exception(msg) from e
+        try:
+            w, h, file_type = get_image_size(io.BytesIO(image_data))
+        except Exception as e:
+            msg = "MarkdownImages: Failed to get_image_size for data from URL [%s]" % rel_p
+            debug(msg, e)
+            raise Exception(msg) from e
+
+        b64_data = base64.encodestring(image_data).decode('ascii').replace('\n', '')
+        img_src = "data:image/%s;base64,%s" % (file_type, b64_data)
+        return img_src, h, w, file_type, url, image_data
 
     @staticmethod
     def on_navigate(url):
@@ -305,19 +339,21 @@ class ImageHandler:
         ImageHandler.phantoms.pop(view.id(), None)
         # Cached URL data is kept
 
-def check_imgattr(view, line_region, link_region=None):
+
+def get_provided_img_attributes(view, line_region, link_region=None):
     # find attrs for this link
     full_line = view.substr(line_region)
     link_till_eol = full_line[link_region.a - line_region.a:]
     # find attr if present
-    m = re.match(r'.*\)\{(.*)\}', link_till_eol)
+    print("## Attrs is [%s]" % link_till_eol)
+    m = re.match(IMAGE_ATTRIBUTES_REGEX, link_till_eol)
     if m:
         return m.groups()[0]
     return ''
 
 
-def get_file_image_size(img):
-    with open(img, 'rb') as f:
+def get_file_image_size(file_path):
+    with open(file_path, 'rb') as f:
         return get_image_size(f)
 
 
@@ -326,7 +362,7 @@ def get_image_size(f):
     Determine the image type of img and return its size.
     """
     head = f.read(24)
-    ttype = None
+    file_type = None
 
     debug(str(head))
     debug(str(head[:4]))
@@ -334,18 +370,18 @@ def get_image_size(f):
 
     if imghdr.what('', head) == 'png':
         debug('detected png')
-        ttype = "png"
+        file_type = "png"
         check = struct.unpack('>i', head[4:8])[0]
         if check != 0x0d0a1a0a:
-            return None, None, ttype
+            return None, None, file_type
         width, height = struct.unpack('>ii', head[16:24])
     elif imghdr.what('', head) == 'gif':
         debug('detected gif')
-        ttype = "gif"
+        file_type = "gif"
         width, height = struct.unpack('<HH', head[6:10])
     elif imghdr.what('', head) == 'jpeg':
         debug('detected jpeg')
-        ttype = "jpeg"
+        file_type = "jpeg"
         try:
             f.seek(0)  # Read 0xff next
             size = 2
@@ -362,7 +398,7 @@ def get_image_size(f):
             height, width = struct.unpack('>HH', f.read(4))
         except Exception as e:
             debug("determining jpeg image size failed", e)
-            return None, None, ttype
+            return None, None, file_type
     elif head[:4] == b'<svg':
         debug('detected svg')
         # SVG is not rendered by ST3 in phantoms.
@@ -372,7 +408,7 @@ def get_image_size(f):
     else:
         debug('unable to detect image')
         return None, None, None
-    return width, height, ttype
+    return width, height, file_type
 
 
 def get_path_for(view):
@@ -412,3 +448,7 @@ class MarkdownImagesHideCommand(sublime_plugin.TextCommand):
 
     def run(self, edit):
         ImageHandler.hide_images(self.view)
+
+
+class SkipImageException(Exception):
+    pass
