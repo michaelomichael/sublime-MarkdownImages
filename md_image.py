@@ -119,11 +119,14 @@ class ImageHandler:
         # We detect when two links are separated only by spaces and merge them
         indexes_to_merge = []
         for i, (left_reg, right_reg) in enumerate(zip(img_regs, img_regs[1:])):
-            inter_region = sublime.Region(left_reg.end(), right_reg.begin())
-            if (view.substr(inter_region)).isspace():
-                # the inter_region is all spaces
-                # Noting that left and right regions must be merged
-                indexes_to_merge += [i + 1]
+            try:
+                inter_region = sublime.Region(left_reg.end(), right_reg.begin())
+                if (view.substr(inter_region)).isspace():
+                    # the inter_region is all spaces
+                    # Noting that left and right regions must be merged
+                    indexes_to_merge += [i + 1]
+            except UnicodeDecodeError as e:
+                print("Warning: MarkdownImages: error handling space characters in line starting at character %d: %s" % (left_reg.a, e))
 
         new_img_regs = []
         for i in range(len(img_regs)):
@@ -172,7 +175,11 @@ class ImageHandler:
                 debug("unknown file_type")
                 continue
 
-            img_attributes = ImageHandler.get_adjusted_img_attributes(h, w, max_width, line_region, region, view)
+            try:
+                img_attributes = ImageHandler.get_adjusted_img_attributes(h, w, max_width, line_region, region, view)
+            except UnicodeDecodeError as e:
+                print("Warning: MarkdownImages: error fetching image attributes in line starting at character %d: %s" % (region.a, e))
+                continue
 
             # Force the phantom image view to append below the first non-whitespace character in the line.
             # Otherwise, the phantom image view interlaces in between
