@@ -16,6 +16,9 @@ DEBUG = False
 
 LEADING_WHITESPACE_REGEX = re.compile("^([ \t]*)")
 IMAGE_ATTRIBUTES_REGEX = re.compile(r'.*\)\{(.*)\}')
+SCALE_ATTRIBUTE_REGEX = re.compile(r'scale *= *"?(\d+\.?\d*)"? *')
+WIDTH_ATTRIBUTE_REGEX = re.compile(r'width *= *"?(\d+\.?\d*)"? *')
+HEIGHT_ATTRIBUTE_REGEX = re.compile(r'height *= *"?(\d+\.?\d*)"? *')
 
 def debug(*args, **kwargs):
     if DEBUG:
@@ -138,7 +141,7 @@ class ImageHandler:
 
         for region in reversed(img_regs):
             line_region = view.line(region)
-            print("## In reversed list, looking at region (%d,%d) [%s]" % (region.a, region.b, view.substr(region)))
+            debug("## In reversed list, looking at region (%d,%d) [%s]" % (region.a, region.b, view.substr(region)))
             image_data = None
             rel_p = view.substr(region)
 
@@ -202,7 +205,7 @@ class ImageHandler:
                 continue
 
             debug("Creating phantom", phantom[0])
-            print("## Creating phantom. Start point is %d" % start_point)
+            debug("## Creating phantom. Start point is %d" % start_point)
             view.add_phantom(phantom[0],
                              sublime.Region(start_point),
                              phantom[1],
@@ -231,18 +234,60 @@ class ImageHandler:
 
         If no attributes are provided, we'll calculate our own width and height
         attributes based on the detected image size.
+
+        If the attributes include:
+            scale="0.5"
+        or
+            scale=0.5
+        then we'll adjust the final width & height accordingly
         """
         # TODO -- handle custom sizes better
         # If only width or height are provided, scale the other dimension
         # properly
         # Width defined in custom size should override max_width
         img_attributes = get_provided_img_attributes(view, line_region, region)
-        if not img_attributes and w > 0 and h > 0:
-            if max_width and w > max_width:
-                m = max_width / w
-                h *= m
-                w = max_width
-            img_attributes = 'width="{}" height="{}"'.format(w, h)
+
+        if not img_attributes:
+            img_attributes = ""
+
+        adjustment_ratio = 1.0
+
+        final_scale = 1.0
+        scale_match = re.search(SCALE_ATTRIBUTE_REGEX, img_attributes)
+        if scale_match:
+            scale_attribute_string = scale_match.group(0)
+            final_scale = float(scale_match.group(1))
+            img_attributes = img_attributes.replace(scale_attribute_string, "")
+
+        width_match = re.search(WIDTH_ATTRIBUTE_REGEX, img_attributes)
+        if width_match:
+            width_attribute_string = width_match.group(0)
+            final_width = float(width_match.group(1))
+            img_attributes = img_attributes.replace(width_attribute_string, "")
+        else:
+            final_width = w
+
+        height_match = re.search(HEIGHT_ATTRIBUTE_REGEX, img_attributes)
+        if height_match:
+            height_attribute_string = height_match.group(0)
+            final_height = float(height_match.group(1))
+            img_attributes = img_attributes.replace(height_attribute_string, "")
+        else:
+            final_height = h
+
+        final_width *= final_scale
+        final_height *= final_scale
+
+        # TODO: only do this if the user hasn't specified a width
+        if max_width and final_width > max_width:
+            ratio = max_width / final_width
+            final_width = max_width
+            final_height *= ratio
+
+        if final_width > 0 and final_height > 0:
+            img_attributes = 'width="{}" height="{}" {}'.format(final_width, final_height, img_attributes)
+
+        debug("##  Final img_attributes is [%s]" % img_attributes)
         return img_attributes
 
     @staticmethod
@@ -352,9 +397,10 @@ def get_provided_img_attributes(view, line_region, link_region=None):
     full_line = view.substr(line_region)
     link_till_eol = full_line[link_region.a - line_region.a:]
     # find attr if present
-    print("## Attrs is [%s]" % link_till_eol)
+    debug("## Attrs is [%s]" % link_till_eol)
     m = re.match(IMAGE_ATTRIBUTES_REGEX, link_till_eol)
     if m:
+        debug("##  Returning extracted attrs [%s]" % m.groups()[0])
         return m.groups()[0]
     return ''
 
