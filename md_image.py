@@ -193,7 +193,7 @@ class ImageHandler:
                 FMT = u'''
                     <a href="{}" style="padding-left:{}px;"><img src="data:image/{}" class="centerImage" {}></a>
                 '''
-                b64_data = base64.encodestring(data).decode('ascii')
+                b64_data = base64.b64encode(data).decode('ascii')
                 b64_data = b64_data.replace('\n', '')
 
                 img = "{};base64,{}".format(ttype, b64_data)
