@@ -191,9 +191,7 @@ class ImageHandler:
                     continue
 
                 FMT = u'''
-                    <a href="{}">
-                        <img src="data:image/{}" class="centerImage" {}>
-                    </a>
+                    <a href="{}" style="padding-left:{}px;"><img src="data:image/{}" class="centerImage" {}></a>
                 '''
                 b64_data = base64.encodestring(data).decode('ascii')
                 b64_data = b64_data.replace('\n', '')
@@ -229,9 +227,7 @@ class ImageHandler:
                 url = url._replace(scheme='file', path=path)
 
                 FMT = '''
-                    <a href="{}">
-                        <img src="{}" class="centerImage" {}>
-                    </a>
+                    <a href="{}" style="padding-left:{}px;"><img src="{}" class="centerImage" {}></a>
                 '''
                 try:
                     w, h, ttype = get_file_image_size(path)
@@ -286,6 +282,13 @@ class ImageHandler:
                 imgattr += ' '
             imgattr += 'width="{}" height="{}"'.format(w, h)
 
+            line_text = view.substr(line_region)
+            debug("line_text is <", line_text, ">")
+            num_leading_whitespace_chars = len(line_text) - len(line_text.lstrip())
+            indent_size = view.text_to_layout(line_region.a + num_leading_whitespace_chars)[0] - view.text_to_layout(line_region.a)[0]
+            debug("num_leading_whitespace_chars", num_leading_whitespace_chars)
+            debug("indent_size", indent_size)
+
             # Force the phantom image view to append past the end of the line
             # Otherwise, the phantom image view interlaces in between
             # word-wrapped lines
@@ -295,7 +298,7 @@ class ImageHandler:
             debug("line_region", line_region)
 
             key = 'mdimage-' + str(line_region.b)
-            html_img = FMT.format(url.geturl(), img, imgattr)
+            html_img = FMT.format(url.geturl(), indent_size, img, imgattr)
 
             phantom = (key, html_img)
             phantoms[phantom[0]] = phantom
